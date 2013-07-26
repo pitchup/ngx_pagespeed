@@ -1,7 +1,12 @@
 BUILDING DEB
 ------------
 
-This will be modified but instructions came from:
+building now condensed into one command:
+    ./build_deb.sh
+
+TODO: have ngx_pagespeed as a git submodule instead
+
+This was based on instructions from:
 https://groups.google.com/forum/#!msg/ngx-pagespeed-discuss/K2qGP7OIYt0/xEXuK46ZsuAJ
 
 This is not really and issue but I wanted to contribute with this steps if someone else need to know how.
