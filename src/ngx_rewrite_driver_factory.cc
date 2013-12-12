@@ -24,9 +24,7 @@
 #include "ngx_message_handler.h"
 #include "ngx_rewrite_options.h"
 #include "ngx_server_context.h"
-#include "ngx_thread_system.h"
 #include "ngx_url_async_fetcher.h"
-#include "pthread_shared_mem.h"
 
 #include "net/instaweb/http/public/content_type.h"
 #include "net/instaweb/http/public/rate_controller.h"
@@ -36,7 +34,7 @@
 #include "net/instaweb/rewriter/public/rewrite_driver_factory.h"
 #include "net/instaweb/rewriter/public/server_context.h"
 #include "net/instaweb/rewriter/public/static_asset_manager.h"
-#include "net/instaweb/apache/in_place_resource_recorder.h"
+#include "net/instaweb/system/public/in_place_resource_recorder.h"
 #include "net/instaweb/system/public/serf_url_async_fetcher.h"
 #include "net/instaweb/system/public/system_caches.h"
 #include "net/instaweb/system/public/system_rewrite_options.h"
@@ -52,6 +50,7 @@
 #include "net/instaweb/util/public/string.h"
 #include "net/instaweb/util/public/string_util.h"
 #include "net/instaweb/util/public/thread_system.h"
+#include "pagespeed/kernel/thread/pthread_shared_mem.h"
 
 namespace net_instaweb {
 
@@ -67,33 +66,23 @@ class Writer;
 const char NgxRewriteDriverFactory::kStaticAssetPrefix[] =
     "/ngx_pagespeed_static/";
 
-namespace {
-
-const char kShutdownCount[] = "child_shutdown_count";
-
-}  // namespace
+class SharedCircularBuffer;
 
 NgxRewriteDriverFactory::NgxRewriteDriverFactory(
-    NgxThreadSystem* ngx_thread_system)
-    : SystemRewriteDriverFactory(ngx_thread_system),
-      ngx_thread_system_(ngx_thread_system),
-      // TODO(oschaaf): mod_pagespeed ifdefs this:
-      shared_mem_runtime_(new ngx::PthreadSharedMem()),
+    SystemThreadSystem* system_thread_system, StringPiece hostname, int port)
+    : SystemRewriteDriverFactory(system_thread_system,
+        NULL /* default shared memory runtime */, hostname, port),
       main_conf_(NULL),
       threads_started_(false),
       use_per_vhost_statistics_(false),
-      is_root_process_(true),
       ngx_message_handler_(new NgxMessageHandler(thread_system()->NewMutex())),
       ngx_html_parse_message_handler_(
           new NgxMessageHandler(thread_system()->NewMutex())),
       install_crash_handler_(false),
-      message_buffer_size_(0),
-      shared_circular_buffer_(NULL),
-      statistics_frozen_(false),
-      ngx_url_async_fetcher_(NULL),
       log_(NULL),
       resolver_timeout_(NGX_CONF_UNSET_MSEC),
-      use_native_fetcher_(false) {
+      use_native_fetcher_(false),
+      ngx_shared_circular_buffer_(NULL) {
   InitializeDefaultOptions();
   default_options()->set_beacon_url("/ngx_pagespeed_beacon");
   SystemRewriteOptions* system_options = dynamic_cast<SystemRewriteOptions*>(
@@ -102,82 +91,34 @@ NgxRewriteDriverFactory::NgxRewriteDriverFactory(
   system_options->set_avoid_renaming_introspective_javascript(true);
   set_message_handler(ngx_message_handler_);
   set_html_parse_message_handler(ngx_html_parse_message_handler_);
-
-  // see https://code.google.com/p/modpagespeed/issues/detail?id=672
-  int thread_limit = 1;
-  caches_.reset(
-      new SystemCaches(this, shared_mem_runtime_.get(), thread_limit));
 }
 
 NgxRewriteDriverFactory::~NgxRewriteDriverFactory() {
   ShutDown();
-
-  CHECK(uninitialized_server_contexts_.empty() || is_root_process_);
+  ngx_shared_circular_buffer_ = NULL;
   STLDeleteElements(&uninitialized_server_contexts_);
-  shared_mem_statistics_.reset(NULL);
 }
 
 Hasher* NgxRewriteDriverFactory::NewHasher() {
   return new MD5Hasher;
 }
 
-UrlAsyncFetcher* NgxRewriteDriverFactory::DefaultAsyncUrlFetcher() {
-  const char* fetcher_proxy = "";
-  if (main_conf_ != NULL) {
-    fetcher_proxy = main_conf_->fetcher_proxy().c_str();
-  }
-
-  UrlAsyncFetcher* fetcher = NULL;
-  SerfUrlAsyncFetcher* serf_fetcher = NULL;
-
+UrlAsyncFetcher* NgxRewriteDriverFactory::AllocateFetcher(
+    SystemRewriteOptions* config) {
   if (use_native_fetcher_) {
-    ngx_url_async_fetcher_ = new NgxUrlAsyncFetcher(
-            fetcher_proxy,
-            log_,
-            resolver_timeout_,
-            25000,
-            resolver_,
-            thread_system(),
-            message_handler());
-    fetcher = ngx_url_async_fetcher_;
+    NgxUrlAsyncFetcher* fetcher = new NgxUrlAsyncFetcher(
+        config->fetcher_proxy().c_str(),
+        log_,
+        resolver_timeout_,
+        config->blocking_fetch_timeout_ms(),
+        resolver_,
+        thread_system(),
+        message_handler());
+    ngx_url_async_fetchers_.push_back(fetcher);
+    return fetcher;
   } else {
-    serf_fetcher = new SerfUrlAsyncFetcher(
-            fetcher_proxy,
-            NULL,
-            thread_system(),
-            statistics(),
-            timer(),
-            2500,
-            message_handler());
-    fetcher = serf_fetcher;
+    return SystemRewriteDriverFactory::AllocateFetcher(config);
   }
-
-  SystemRewriteOptions* system_options = dynamic_cast<SystemRewriteOptions*>(
-      default_options());
-  if (rate_limit_background_fetches_) {
-    // Unfortunately, we need stats for load-shedding.
-    if (system_options->statistics_enabled()) {
-      // TODO(oschaaf): mps bases this multiplier on the configured
-      // num_rewrite_threads_ which we don't have (yet).
-      int multiplier = 4;
-      fetcher = new RateControllingUrlAsyncFetcher(
-          fetcher,
-          500 * multiplier /* max queue size */,
-          multiplier /* requests/host */,
-          500 * multiplier /* queued per host */,
-          thread_system(),
-          statistics());
-      if (serf_fetcher != NULL) {
-        defer_cleanup(new Deleter<SerfUrlAsyncFetcher>(serf_fetcher));
-      } else if (ngx_url_async_fetcher_ != NULL) {
-        defer_cleanup(new Deleter<NgxUrlAsyncFetcher>(ngx_url_async_fetcher_));
-      }
-    } else {
-      message_handler()->Message(
-          kError, "Can't enable fetch rate-limiting without statistics");
-    }
-  }
-  return fetcher;
 }
 
 MessageHandler* NgxRewriteDriverFactory::DefaultHtmlParseMessageHandler() {
@@ -201,44 +142,25 @@ NamedLockManager* NgxRewriteDriverFactory::DefaultLockManager() {
   return NULL;
 }
 
-void NgxRewriteDriverFactory::SetupCaches(ServerContext* server_context) {
-  // TODO(anupama): Remove duplication wrt mod_pagespeed code.
-  caches_->SetupCaches(server_context);
-
-  server_context->set_enable_property_cache(true);
-  PropertyCache* pcache = server_context->page_property_cache();
-  const PropertyCache::Cohort* cohort =
-    pcache->AddCohort(RewriteDriver::kBeaconCohort);
-  server_context->set_beacon_cohort(cohort);
-
-  cohort = pcache->AddCohort(RewriteDriver::kDomCohort);
-  server_context->set_dom_cohort(cohort);
-}
-
 RewriteOptions* NgxRewriteDriverFactory::NewRewriteOptions() {
   NgxRewriteOptions* options = new NgxRewriteOptions(thread_system());
   options->SetRewriteLevel(RewriteOptions::kCoreFilters);
   return options;
 }
 
-
 void NgxRewriteDriverFactory::InitStaticAssetManager(
     StaticAssetManager* static_asset_manager) {
   static_asset_manager->set_library_url_prefix(kStaticAssetPrefix);
 }
 
-void NgxRewriteDriverFactory::PrintMemCacheStats(GoogleString* out) {
-  // TODO(morlovich): Port the client code to proper API, so it gets
-  // shm stats, too.
-  caches_->PrintCacheStats(SystemCaches::kIncludeMemcached, out);
-}
-
-bool NgxRewriteDriverFactory::InitNgxUrlAsyncFetcher() {
-  if (ngx_url_async_fetcher_ == NULL) {
-    return true;
-  }
+bool NgxRewriteDriverFactory::InitNgxUrlAsyncFetchers() {
   log_ = ngx_cycle->log;
-  return ngx_url_async_fetcher_->Init();
+  for (size_t i = 0; i < ngx_url_async_fetchers_.size(); ++i) {
+    if (!ngx_url_async_fetchers_[i]->Init()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool NgxRewriteDriverFactory::CheckResolver() {
@@ -248,13 +170,9 @@ bool NgxRewriteDriverFactory::CheckResolver() {
   return true;
 }
 
-void NgxRewriteDriverFactory::StopCacheActivity() {
-  RewriteDriverFactory::StopCacheActivity();
-  caches_->StopCacheActivity();
-}
-
-NgxServerContext* NgxRewriteDriverFactory::MakeNgxServerContext() {
-  NgxServerContext* server_context = new NgxServerContext(this);
+NgxServerContext* NgxRewriteDriverFactory::MakeNgxServerContext(
+    StringPiece hostname, int port) {
+  NgxServerContext* server_context = new NgxServerContext(this, hostname, port);
   uninitialized_server_contexts_.insert(server_context);
   return server_context;
 }
@@ -264,13 +182,7 @@ ServerContext* NgxRewriteDriverFactory::NewServerContext() {
   return NULL;
 }
 
-void NgxRewriteDriverFactory::ShutDown() {
-  StopCacheActivity();
-  if (!is_root_process_) {
-    Variable* child_shutdown_count = statistics()->GetVariable(kShutdownCount);
-    child_shutdown_count->Add(1);
-  }
-
+void NgxRewriteDriverFactory::ShutDownMessageHandlers() {
   ngx_message_handler_->set_buffer(NULL);
   ngx_html_parse_message_handler_->set_buffer(NULL);
   for (NgxMessageHandlerSet::iterator p =
@@ -279,27 +191,12 @@ void NgxRewriteDriverFactory::ShutDown() {
     (*p)->set_buffer(NULL);
   }
   server_context_message_handlers_.clear();
-
-  RewriteDriverFactory::ShutDown();
-  caches_->ShutDown(message_handler());
-
-  if (is_root_process_) {
-    // Cleanup statistics.
-    // TODO(morlovich): This looks dangerous with async.
-    if (shared_mem_statistics_.get() != NULL) {
-      shared_mem_statistics_->GlobalCleanup(message_handler());
-    }
-    if (shared_circular_buffer_ != NULL) {
-      shared_circular_buffer_->GlobalCleanup(message_handler());
-    }
-  }
 }
 
 void NgxRewriteDriverFactory::StartThreads() {
   if (threads_started_) {
     return;
   }
-  ngx_thread_system_->PermitThreadStarting();
   // TODO(jefftk): use a native nginx timer instead of running our own thread.
   // See issue #111.
   SchedulerThread* thread = new SchedulerThread(thread_system(), scheduler());
@@ -309,107 +206,20 @@ void NgxRewriteDriverFactory::StartThreads() {
   threads_started_ = true;
 }
 
-void NgxRewriteDriverFactory::ParentOrChildInit(ngx_log_t* log) {
+void NgxRewriteDriverFactory::LoggingInit(ngx_log_t* log) {
+  net_instaweb::log_message_handler::Install(log);
   if (install_crash_handler_) {
     NgxMessageHandler::InstallCrashHandler(log);
   }
   ngx_message_handler_->set_log(log);
   ngx_html_parse_message_handler_->set_log(log);
-  SharedCircularBufferInit(is_root_process_);
 }
 
-// TODO(jmarantz): make this per-vhost.
-void NgxRewriteDriverFactory::SharedCircularBufferInit(bool is_root) {
-  // Set buffer size to 0 means turning it off
-  if (shared_mem_runtime() != NULL && (message_buffer_size_ != 0)) {
-    // TODO(jmarantz): it appears that filename_prefix() is not actually
-    // established at the time of this construction, calling into question
-    // whether we are naming our shared-memory segments correctly.
-    shared_circular_buffer_.reset(new SharedCircularBuffer(
-        shared_mem_runtime(),
-        message_buffer_size_,
-        filename_prefix().as_string(),
-        "foo.com" /*hostname_identifier()*/));
-    if (shared_circular_buffer_->InitSegment(is_root, message_handler())) {
-      ngx_message_handler_->set_buffer(shared_circular_buffer_.get());
-      ngx_html_parse_message_handler_->set_buffer(
-          shared_circular_buffer_.get());
-    }
-  }
-}
-
-void NgxRewriteDriverFactory::RootInit(ngx_log_t* log) {
-  net_instaweb::log_message_handler::Install(log);
-
-  ParentOrChildInit(log);
-
-  // Let SystemCaches know about the various paths we have in configuration
-  // first, as well as the memcached instances.
-  for (NgxServerContextSet::iterator p = uninitialized_server_contexts_.begin(),
-           e = uninitialized_server_contexts_.end(); p != e; ++p) {
-    NgxServerContext* server_context = *p;
-    caches_->RegisterConfig(server_context->config());
-  }
-
-  caches_->RootInit();
-}
-
-void NgxRewriteDriverFactory::ChildInit(ngx_log_t* log) {
-  is_root_process_ = false;
-
-  ParentOrChildInit(log);
-  if (shared_mem_statistics_.get() != NULL) {
-    shared_mem_statistics_->Init(false, message_handler());
-  }
-
-  caches_->ChildInit();
-  for (NgxServerContextSet::iterator p = uninitialized_server_contexts_.begin(),
-           e = uninitialized_server_contexts_.end(); p != e; ++p) {
-    NgxServerContext* server_context = *p;
-    server_context->ChildInit();
-  }
-
-  uninitialized_server_contexts_.clear();
-}
-
-// Initializes global statistics object if needed, using factory to
-// help with the settings if needed.
-// Note: does not call set_statistics() on the factory.
-Statistics* NgxRewriteDriverFactory::MakeGlobalSharedMemStatistics(
-    const NgxRewriteOptions& options) {
-  if (shared_mem_statistics_.get() == NULL) {
-    shared_mem_statistics_.reset(AllocateAndInitSharedMemStatistics(
-        "global", options));
-  }
-  DCHECK(!statistics_frozen_);
-  statistics_frozen_ = true;
-  SetStatistics(shared_mem_statistics_.get());
-  return shared_mem_statistics_.get();
-}
-
-SharedMemStatistics* NgxRewriteDriverFactory::
-AllocateAndInitSharedMemStatistics(
-    const StringPiece& name,
-    const NgxRewriteOptions& options) {
-  GoogleString log_filename;
-  bool logging_enabled = false;
-  if (!options.log_dir().empty()) {
-    // Only enable statistics logging if a log_dir() is actually specified.
-    log_filename = StrCat(options.log_dir(), "/stats_log_", name);
-    logging_enabled = options.statistics_logging_enabled();
-  }
-  // Note that we create the statistics object in the parent process, and
-  // it stays around in the kids but gets reinitialized for them
-  // inside ChildInit(), called from pagespeed_child_init.
-  SharedMemStatistics* stats = new SharedMemStatistics(
-      options.statistics_logging_interval_ms(),
-      options.statistics_logging_max_file_size_kb(),
-      log_filename, logging_enabled,
-      StrCat(filename_prefix(), name), shared_mem_runtime(), message_handler(),
-      file_system(), timer());
-  InitStats(stats);
-  stats->Init(true, message_handler());
-  return stats;
+void NgxRewriteDriverFactory::SetCircularBuffer(
+    SharedCircularBuffer* buffer) {
+  ngx_shared_circular_buffer_ = buffer;
+  ngx_message_handler_->set_buffer(buffer);
+  ngx_html_parse_message_handler_->set_buffer(buffer);
 }
 
 void NgxRewriteDriverFactory::SetServerContextMessageHandler(
@@ -417,7 +227,9 @@ void NgxRewriteDriverFactory::SetServerContextMessageHandler(
   NgxMessageHandler* handler = new NgxMessageHandler(
       thread_system()->NewMutex());
   handler->set_log(log);
-  handler->set_buffer(shared_circular_buffer_.get());
+  // The ngx_shared_circular_buffer_ will be NULL if MessageBufferSize hasn't
+  // been raised from its default of 0.
+  handler->set_buffer(ngx_shared_circular_buffer_);
   server_context_message_handlers_.insert(handler);
   defer_cleanup(new Deleter<NgxMessageHandler>(handler));
   server_context->set_message_handler(handler);
@@ -432,8 +244,6 @@ void NgxRewriteDriverFactory::InitStats(Statistics* statistics) {
   // Init Ngx-specific stats.
   NgxServerContext::InitStats(statistics);
   InPlaceResourceRecorder::InitStats(statistics);
-
-  statistics->AddVariable(kShutdownCount);
 }
 
 }  // namespace net_instaweb

@@ -37,21 +37,21 @@ recompiling Tengine](https://github.com/pagespeed/ngx_pagespeed/wiki/Using-ngx_p
 
    ```bash
    $ cd ~
-   $ wget https://github.com/pagespeed/ngx_pagespeed/archive/release-1.6.29.5-beta.zip
-   $ unzip release-1.6.29.5-beta.zip # or unzip release-1.6.29.5-beta
-   $ cd ngx_pagespeed-release-1.6.29.5-beta/
-   $ wget https://dl.google.com/dl/page-speed/psol/1.6.29.5.tar.gz
-   $ tar -xzvf 1.6.29.5.tar.gz # expands to psol/
+   $ wget https://github.com/pagespeed/ngx_pagespeed/archive/v1.7.30.1-beta.zip
+   $ unzip v1.7.30.1-beta.zip # or unzip v1.7.30.1-beta
+   $ cd ngx_pagespeed-1.7.30.1-beta/
+   $ wget https://dl.google.com/dl/page-speed/psol/1.7.30.1.tar.gz
+   $ tar -xzvf 1.7.30.1.tar.gz # expands to psol/
    ```
 
 3. Download and build nginx:
 
    ```bash
    $ # check http://nginx.org/en/download.html for the latest version
-   $ wget http://nginx.org/download/nginx-1.4.2.tar.gz
-   $ tar -xvzf nginx-1.4.2.tar.gz
-   $ cd nginx-1.4.2/
-   $ ./configure --add-module=$HOME/ngx_pagespeed-release-1.6.29.5-beta
+   $ wget http://nginx.org/download/nginx-1.4.3.tar.gz
+   $ tar -xvzf nginx-1.4.3.tar.gz
+   $ cd nginx-1.4.3/
+   $ ./configure --add-module=$HOME/ngx_pagespeed-1.7.30.1-beta
    $ make
    $ sudo make install
    ```
@@ -72,9 +72,7 @@ In your `nginx.conf`, add to the main or server block:
 
 ```nginx
 pagespeed on;
-
-# needs to exist and be writable by nginx
-pagespeed FileCachePath /var/ngx_pagespeed_cache;
+pagespeed FileCachePath /var/ngx_pagespeed_cache;  # Use tmpfs for best results.
 ```
 
 In every server block where pagespeed is enabled add:
@@ -86,6 +84,7 @@ location ~ "\.pagespeed\.([a-z]\.)?[a-z]{2}\.[^.]{10}\.[^.]+" { add_header "" ""
 location ~ "^/ngx_pagespeed_static/" { }
 location ~ "^/ngx_pagespeed_beacon$" { }
 location /ngx_pagespeed_statistics { allow 127.0.0.1; deny all; }
+location /ngx_pagespeed_global_statistics { allow 127.0.0.1; deny all; }
 location /ngx_pagespeed_message { allow 127.0.0.1; deny all; }
 location /pagespeed_console { allow 127.0.0.1; deny all; }
 ```
@@ -95,7 +94,7 @@ To confirm that the module is loaded, fetch a page and check that you see the
 
 ```bash
 $ curl -I 'http://localhost:8050/some_page/' | grep X-Page-Speed
-X-Page-Speed: 1.6.29.5-...
+X-Page-Speed: 1.7.30.1-...
 ```
 
 Looking at the source of a few pages you should see various changes, such as
@@ -115,3 +114,20 @@ the progress of the project:
   list](https://groups.google.com/forum/#!forum/ngx-pagespeed-discuss)
 - [ngx-pagespeed-announce mailing
   list](https://groups.google.com/forum/#!forum/ngx-pagespeed-announce)
+
+Note: The
+[canonicalize_javascript_libraries](https://developers.google.com/speed/pagespeed/module/filter-canonicalize-js)
+depends on `pagespeed_libraries.conf` which is distributed in Apache's format.
+To convert it to the Nginx format, run:
+
+```bash
+$ scripts/pagespeed_libraries_generator.sh > ~/pagespeed_libraries.conf
+$ sudo mv ~/pagespeed_libraries.conf /etc/nginx/
+```
+
+And then include it in your Nginx configuration by reference:
+
+```nginx
+include pagespeed_libraries.conf;
+pagespeed EnableFilters canonicalize_javascript_libraries;
+```

@@ -57,14 +57,9 @@ class NgxBaseFetch : public AsyncFetch {
  public:
   NgxBaseFetch(ngx_http_request_t* r, int pipe_fd,
                NgxServerContext* server_context,
-               const RequestContextPtr& request_ctx);
+               const RequestContextPtr& request_ctx,
+               PreserveCachingHeaders preserve_caching_headers);
   virtual ~NgxBaseFetch();
-
-  // Copies the request headers out of request_->headers_in->headers.
-  void PopulateRequestHeaders();
-
-  // Copies the response headers out of request_->headers_out->headers.
-  void PopulateResponseHeaders();
 
   // Puts a chain in link_ptr if we have any output data buffered.  Returns
   // NGX_OK on success, NGX_ERROR on errors.  If there's no data to send, sends
@@ -123,6 +118,7 @@ class NgxBaseFetch : public AsyncFetch {
   int references_;
   pthread_mutex_t mutex_;
   bool handle_error_;
+  PreserveCachingHeaders preserve_caching_headers_;
 
   DISALLOW_COPY_AND_ASSIGN(NgxBaseFetch);
 };

@@ -21,19 +21,23 @@
 #ifndef NGX_SERVER_CONTEXT_H_
 #define NGX_SERVER_CONTEXT_H_
 
+#include "ngx_message_handler.h"
 #include "net/instaweb/system/public/system_server_context.h"
+
+extern "C" {
+#include <ngx_http.h>
+}
 
 namespace net_instaweb {
 
 class NgxRewriteDriverFactory;
 class NgxRewriteOptions;
-class RewriteStats;
-class SharedMemStatistics;
-class Statistics;
+class SystemRequestContext;
 
 class NgxServerContext : public SystemServerContext {
  public:
-  explicit NgxServerContext(NgxRewriteDriverFactory* factory);
+  NgxServerContext(
+      NgxRewriteDriverFactory* factory, StringPiece hostname, int port);
   virtual ~NgxServerContext();
 
   // We expect to use ProxyFetch with HTML.
@@ -43,34 +47,16 @@ class NgxServerContext : public SystemServerContext {
   // nginx-specific behavior, call global_options() instead which doesn't
   // downcast.
   NgxRewriteOptions* config();
-  // Should be called after the child process is forked.
-  void ChildInit();
-  // Initialize this ServerContext to have its own statistics domain.
-  // Must be called after global_statistics has been created and had
-  // ::Initialize called on it.
-  void CreateLocalStatistics(Statistics* global_statistics);
-  static void InitStats(Statistics* statistics);
-  virtual void ApplySessionFetchers(const RequestContextPtr& req,
-                                    RewriteDriver* driver);
-  bool initialized() const { return initialized_; }
-  GoogleString hostname_identifier() { return hostname_identifier_; }
-  void set_hostname_identifier(GoogleString x) { hostname_identifier_ = x; }
+
   NgxRewriteDriverFactory* ngx_rewrite_driver_factory() { return ngx_factory_; }
+  SystemRequestContext* NewRequestContext(ngx_http_request_t* r);
+
+  NgxMessageHandler* ngx_message_handler() {
+    return dynamic_cast<NgxMessageHandler*>(message_handler());
+  }
 
  private:
   NgxRewriteDriverFactory* ngx_factory_;
-  // hostname_identifier_ is used to distinguish the name of shared memory
-  // segments associated with this ServerContext
-  GoogleString hostname_identifier_;
-  bool initialized_;
-
-  // Non-NULL if we have per-vhost stats.
-  scoped_ptr<Statistics> split_statistics_;
-
-  // May be NULL. Owned by *split_statistics_.
-  SharedMemStatistics* local_statistics_;
-  // These are non-NULL if we have per-vhost stats.
-  scoped_ptr<RewriteStats> local_rewrite_stats_;
 
   DISALLOW_COPY_AND_ASSIGN(NgxServerContext);
 };

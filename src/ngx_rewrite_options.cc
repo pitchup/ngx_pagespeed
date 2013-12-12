@@ -43,6 +43,12 @@ const char kNgxPagespeedStatisticsHandlerPath[] = "/ngx_pagespeed_statistics";
 
 RewriteOptions::Properties* NgxRewriteOptions::ngx_properties_ = NULL;
 
+NgxRewriteOptions::NgxRewriteOptions(const StringPiece& description,
+                                     ThreadSystem* thread_system)
+    : SystemRewriteOptions(description, thread_system) {
+  Init();
+}
+
 NgxRewriteOptions::NgxRewriteOptions(ThreadSystem* thread_system)
     : SystemRewriteOptions(thread_system) {
   Init();
@@ -63,18 +69,11 @@ void NgxRewriteOptions::AddProperties() {
   // Nothing ngx-specific for now.
 
   MergeSubclassProperties(ngx_properties_);
-  // We create a dummy NgxRewriteOptions object here so that we can
-  // call InitializeSignaturesAndDefaults on it, and in turn get the
-  // global defaults (for say, X-Page-Speed header value) setup correctly.
+
+  // Default properties are global but to set them the current API requires
+  // a RewriteOptions instance and we're in a static method.
   NgxRewriteOptions dummy_config(NULL);
-  dummy_config.InitializeSignaturesAndDefaults();
-}
-
-void NgxRewriteOptions::InitializeSignaturesAndDefaults() {
-  // Calls to foo_.DoNotUseForSignatureComputation() would go here.
-
-  // Set default header value.
-  set_default_x_header_value(kModPagespeedVersion);
+  dummy_config.set_default_x_header_value(kModPagespeedVersion);
 }
 
 void NgxRewriteOptions::Initialize() {
@@ -110,28 +109,26 @@ RewriteOptions::OptionSettingResult NgxRewriteOptions::ParseAndSetOptions0(
 }
 
 RewriteOptions::OptionSettingResult
-    NgxRewriteOptions::ParseAndSetOptionFromEnum1(
-        OptionEnum directive, StringPiece arg,
+    NgxRewriteOptions::ParseAndSetOptionFromName1(
+        StringPiece name, StringPiece arg,
         GoogleString* msg, MessageHandler* handler) {
   // FileCachePath needs error checking.
-  if (directive == kFileCachePath) {
+  if (StringCaseEqual(name, kFileCachePath)) {
     if (!StringCaseStartsWith(arg, "/")) {
       *msg = "must start with a slash";
       return RewriteOptions::kOptionValueInvalid;
     }
   }
 
-  // TODO(jefftk): port these (no enums for them yet, even!)
-  //  DangerPermitFetchFromUnknownHosts, FetchWithGzip, ForceCaching
-
-  return SystemRewriteOptions::ParseAndSetOptionFromEnum1(
-      directive, arg, msg, handler);
+  return SystemRewriteOptions::ParseAndSetOptionFromName1(
+      name, arg, msg, handler);
 }
 
+template <class DriverFactoryT>
 RewriteOptions::OptionSettingResult ParseAndSetOptionHelper(
     StringPiece option_value,
-    NgxRewriteDriverFactory* driver_factory,
-    void (NgxRewriteDriverFactory::*set_option_method)(bool)) {
+    DriverFactoryT* driver_factory,
+    void (DriverFactoryT::*set_option_method)(bool)) {
   bool parsed_value;
   if (StringCaseEqual(option_value, "on") ||
       StringCaseEqual(option_value, "true")) {
@@ -170,11 +167,11 @@ const char* NgxRewriteOptions::ParseAndSetOptions(
     // TODO(morlovich): Remove these special hacks, and handle these via
     // ParseAndSetOptionFromEnum1.
     if (IsDirective(directive, "UsePerVHostStatistics")) {
-      result = ParseAndSetOptionHelper(
+      result = ParseAndSetOptionHelper<NgxRewriteDriverFactory>(
           arg, driver_factory,
           &NgxRewriteDriverFactory::set_use_per_vhost_statistics);
     } else if (IsDirective(directive, "InstallCrashHandler")) {
-      result = ParseAndSetOptionHelper(
+      result = ParseAndSetOptionHelper<NgxRewriteDriverFactory>(
           arg, driver_factory,
           &NgxRewriteDriverFactory::set_install_crash_handler);
     } else if (IsDirective(directive, "MessageBufferSize")) {
@@ -187,17 +184,25 @@ const char* NgxRewriteOptions::ParseAndSetOptions(
         result = RewriteOptions::kOptionValueInvalid;
       }
     } else if (IsDirective(directive, "UseNativeFetcher")) {
-      result = ParseAndSetOptionHelper(
+      result = ParseAndSetOptionHelper<NgxRewriteDriverFactory>(
           arg, driver_factory,
           &NgxRewriteDriverFactory::set_use_native_fetcher);
     } else if (IsDirective(directive, "RateLimitBackgroundFetches")) {
-      result = ParseAndSetOptionHelper(
+      result = ParseAndSetOptionHelper<NgxRewriteDriverFactory>(
           arg, driver_factory,
           &NgxRewriteDriverFactory::set_rate_limit_background_fetches);
     } else if (IsDirective(directive, "ForceCaching")) {
-      result = ParseAndSetOptionHelper(
+      result = ParseAndSetOptionHelper<SystemRewriteDriverFactory>(
           arg, driver_factory,
-          &NgxRewriteDriverFactory::set_force_caching);
+          &SystemRewriteDriverFactory::set_force_caching);
+    } else if (IsDirective(directive, "ListOutstandingUrlsOnError")) {
+      result = ParseAndSetOptionHelper<SystemRewriteDriverFactory>(
+          arg, driver_factory,
+          &SystemRewriteDriverFactory::list_outstanding_urls_on_error);
+    } else if (IsDirective(directive, "TrackOriginalContentLength")) {
+      result = ParseAndSetOptionHelper<SystemRewriteDriverFactory>(
+          arg, driver_factory,
+          &SystemRewriteDriverFactory::set_track_original_content_length);
     } else {
       result = ParseAndSetOptionFromName1(directive, args[1], &msg, handler);
     }
@@ -236,7 +241,7 @@ const char* NgxRewriteOptions::ParseAndSetOptions(
         StrAppend(&full_directive, i == 0 ? "" : " ", args[i]);
       }
       StrAppend(&full_directive, "\": ", msg);
-      char* s = ngx_psol::string_piece_to_pool_string(pool, full_directive);
+      char* s = string_piece_to_pool_string(pool, full_directive);
       if (s == NULL) {
         return "failed to allocate memory";
       }
@@ -249,7 +254,8 @@ const char* NgxRewriteOptions::ParseAndSetOptions(
 }
 
 NgxRewriteOptions* NgxRewriteOptions::Clone() const {
-  NgxRewriteOptions* options = new NgxRewriteOptions(thread_system());
+  NgxRewriteOptions* options = new NgxRewriteOptions(
+      StrCat("cloned from ", description()), thread_system());
   options->Merge(*this);
   return options;
 }

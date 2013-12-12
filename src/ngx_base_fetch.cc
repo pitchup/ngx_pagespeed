@@ -30,7 +30,8 @@ namespace net_instaweb {
 
 NgxBaseFetch::NgxBaseFetch(ngx_http_request_t* r, int pipe_fd,
                            NgxServerContext* server_context,
-                           const RequestContextPtr& request_ctx)
+                           const RequestContextPtr& request_ctx,
+                           PreserveCachingHeaders preserve_caching_headers)
     : AsyncFetch(request_ctx),
       request_(r),
       server_context_(server_context),
@@ -38,9 +39,9 @@ NgxBaseFetch::NgxBaseFetch(ngx_http_request_t* r, int pipe_fd,
       last_buf_sent_(false),
       pipe_fd_(pipe_fd),
       references_(2),
-      handle_error_(true) {
+      handle_error_(true),
+      preserve_caching_headers_(preserve_caching_headers) {
   if (pthread_mutex_init(&mutex_, NULL)) CHECK(0);
-  PopulateRequestHeaders();
 }
 
 NgxBaseFetch::~NgxBaseFetch() {
@@ -54,15 +55,6 @@ void NgxBaseFetch::Lock() {
 void NgxBaseFetch::Unlock() {
   pthread_mutex_unlock(&mutex_);
 }
-
-void NgxBaseFetch::PopulateRequestHeaders() {
-  ngx_psol::copy_request_headers_from_ngx(request_, request_headers());
-}
-
-void NgxBaseFetch::PopulateResponseHeaders() {
-  ngx_psol::copy_response_headers_from_ngx(request_, response_headers());
-}
-
 
 bool NgxBaseFetch::HandleWrite(const StringPiece& sp,
                                MessageHandler* handler) {
@@ -83,7 +75,7 @@ ngx_int_t NgxBaseFetch::CopyBufferToNginx(ngx_chain_t** link_ptr) {
     return NGX_AGAIN;
   }
 
-  int rc = ngx_psol::string_piece_to_buffer_chain(
+  int rc = string_piece_to_buffer_chain(
       request_->pool, buffer_, link_ptr, done_called_ /* send_last_buf */);
   if (rc != NGX_OK) {
     return rc;
@@ -120,7 +112,8 @@ ngx_int_t NgxBaseFetch::CollectHeaders(ngx_http_headers_out_t* headers_out) {
   //   headers_out->content_length_n = content_length();
   // }
 
-  return ngx_psol::copy_response_headers_to_ngx(request_, *pagespeed_headers);
+  return copy_response_headers_to_ngx(request_, *pagespeed_headers,
+                                      preserve_caching_headers_);
 }
 
 void NgxBaseFetch::RequestCollection() {
