@@ -1,7 +1,8 @@
 #/bin/bash
 
-NGINX_VERSION=1.4.2
+NGINX_VERSION=1.4.4
 OPENSSL_VERSION=1.0.1e
+PSOL_VERSION=1.7.30.1
 
 # update list of packages
 sudo apt-get update
@@ -16,17 +17,15 @@ sudo apt-get build-dep nginx=$NGINX_VERSION
 sudo apt-get install build-essential zlib1g-dev libpcre3 libpcre3-dev
 
 # psol lib (needed for pagespeed)
-rm 1.6.29.5.tar.gz 
-wget https://dl.google.com/dl/page-speed/psol/1.6.29.5.tar.gz
-tar -xzvf 1.6.29.5.tar.gz # expands to psol/
+wget -r https://dl.google.com/dl/page-speed/psol/${PSOL_VERSION}.tar.gz
+tar -xzvf ${PSOL_VERSION}.tar.gz
 
 # openssl (lucids version is old)
-rm -rf openssl-${OPENSSL_VERSION}
-wget http://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz
+wget -r http://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz
 tar -xzvf openssl-${OPENSSL_VERSION}.tar.gz
 
 # install the nginx source
-rm -rf build
+#rm -rf build
 mkdir build
 cd build
 apt-get source nginx=$NGINX_VERSION
