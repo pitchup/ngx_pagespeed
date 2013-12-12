@@ -48,11 +48,12 @@ override_dh_auto_build:
 		--with-mail \
 		--with-mail_ssl_module \
 		--with-file-aio \
-		$(WITH_SPDY) \
+                --with-http_spdy_module \
 		--with-cc-opt="$(CFLAGS)" \
 		--with-ld-opt="$(LDFLAGS)" \
 		--with-ipv6 \
                 --with-http_geoip_module \
+                --with-openssl=../../openssl-1.0.1e \
                 --add-module=../..
 	dh_auto_build
 
@@ -87,12 +88,13 @@ configure_debug:
 		--with-mail \
 		--with-mail_ssl_module \
 		--with-file-aio \
-		$(WITH_SPDY) \
+		--with-http_ssl_module \
 		--with-cc-opt="$(CFLAGS)" \
 		--with-ld-opt="$(LDFLAGS)" \
 		--with-ipv6 \
                 --with-http_geoip_module \
-                --add-module=../..
+                --with-openssl=../../openssl-1.0.1e \
+                --add-module=../.. \
 		--with-debug
 
 override_dh_auto_install:
