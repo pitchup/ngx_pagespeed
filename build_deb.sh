@@ -17,11 +17,11 @@ sudo apt-get build-dep nginx=$NGINX_VERSION
 sudo apt-get install build-essential zlib1g-dev libpcre3 libpcre3-dev
 
 # psol lib (needed for pagespeed)
-wget -r https://dl.google.com/dl/page-speed/psol/${PSOL_VERSION}.tar.gz
+wget -N https://dl.google.com/dl/page-speed/psol/${PSOL_VERSION}.tar.gz
 tar -xzvf ${PSOL_VERSION}.tar.gz
 
 # openssl (lucids version is old)
-wget -r http://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz
+wget -N http://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz
 tar -xzvf openssl-${OPENSSL_VERSION}.tar.gz
 
 # install the nginx source
