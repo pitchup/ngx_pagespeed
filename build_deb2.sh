@@ -1,9 +1,9 @@
-#/bin/bash
+#/bin/bash -x
 
 NGINX_VERSION=1.4.4
 OPENSSL_VERSION=1.0.1e
-PSOL_VERSION=1.6.29.7
-PAGESPEED_VERSION=release-1.6.29.7-beta
+PSOL_VERSION=1.7.30.2
+PAGESPEED_VERSION=1.7.30.2-beta
 UBUNTU_VERSION=lucid
 
 # add nginx to sources
@@ -33,8 +33,8 @@ tar -xzvf openssl-${OPENSSL_VERSION}.tar.gz
 ln -sf openssl-${OPENSSL_VERSION} openssl
 
 # download pagespeed
-wget -N https://github.com/pagespeed/ngx_pagespeed/archive/${PAGESPEED_VERSION}.zip
-unzip -o ${PAGESPEED_VERSION}.zip
+wget -N https://github.com/pagespeed/ngx_pagespeed/archive/v${PAGESPEED_VERSION}.zip
+unzip -o v${PAGESPEED_VERSION}.zip
 ln -sf ngx_pagespeed-${PAGESPEED_VERSION} ngx_pagespeed 
 cd ngx_pagespeed
 
